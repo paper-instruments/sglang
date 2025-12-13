@@ -1185,6 +1185,10 @@ class ModelRunner:
             for handle in handles:
                 handle.wait()
 
+            if self.server_args.online_weight_update_inplace_copy:
+                success, message = _model_load_weights_inplace_strict(self.model, weights)
+                return success, message
+
             self.model.load_weights(weights)
             return True, "Succeeded to update parameter online."
 
@@ -1217,8 +1221,11 @@ class ModelRunner:
                 group=self._model_update_group[group_name],
             )
             reconstructed_tensors = bucket.reconstruct_tensors()
+            if self.server_args.online_weight_update_inplace_copy:
+                return _model_load_weights_inplace_strict(self.model, reconstructed_tensors)
+
             self.model.load_weights(reconstructed_tensors)
-            return True, f"Succeeded to update parameter online."
+            return True, "Succeeded to update parameter online."
         except Exception as e:
             error_msg = (
                 f"Failed to update parameter online: {e}. "
@@ -1248,6 +1255,20 @@ class ModelRunner:
             (name, _unwrap_tensor(tensor, tp_rank=self.tp_rank, device=infered_device))
             for name, tensor in named_tensors
         ]
+
+        if self.server_args.online_weight_update_inplace_copy:
+            if load_format in self.server_args.custom_weight_loader:
+                return (
+                    False,
+                    "In-place online weight update mode does not support custom weight loaders.",
+                )
+            if load_format not in (None, "direct"):
+                return (
+                    False,
+                    f"In-place online weight update mode does not support load_format={load_format}.",
+                )
+            return _model_load_weights_inplace_strict(self.model, named_tensors)
+
         if load_format == "direct":
             _model_load_weights_direct(self.model, named_tensors)
         elif load_format in self.server_args.custom_weight_loader:
@@ -1285,6 +1306,9 @@ class ModelRunner:
             flattened_tensor=flattened_tensor, metadata=converted_metadata
         )
         reconstructed_tensors = bucket.reconstruct_tensors()
+
+        if self.server_args.online_weight_update_inplace_copy:
+            return _model_load_weights_inplace_strict(self.model, reconstructed_tensors)
 
         # Load the reconstructed tensors using the standard method
         self.model.load_weights(reconstructed_tensors)
@@ -2873,6 +2897,59 @@ def _model_load_weights_direct(model, named_tensors: List[Tuple[str, torch.Tenso
     params_dict = dict(model.named_parameters())
     for name, tensor in named_tensors:
         default_weight_loader(params_dict[name], tensor)
+
+
+def _model_load_weights_inplace_strict(
+    model: nn.Module, named_tensors: List[Tuple[str, torch.Tensor]]
+) -> tuple[bool, str]:
+    """Apply weight updates by copying into existing parameter/buffer storages.
+
+    This is intended for online/in-flight weight updates where pointer/storage
+    stability is required. It fails closed on missing tensors or shape/dtype
+    mismatch and avoids rebinding nn.Parameter objects.
+    """
+
+    params_dict = dict(model.named_parameters())
+    buffers_dict = dict(model.named_buffers())
+
+    errors: List[str] = []
+    for name, tensor in named_tensors:
+        if name in params_dict:
+            dst = params_dict[name]
+            dst_tensor = dst.data
+        elif name in buffers_dict:
+            dst_tensor = buffers_dict[name]
+        else:
+            errors.append(f"missing tensor: {name}")
+            continue
+
+        if dst_tensor.shape != tensor.shape:
+            errors.append(
+                f"shape mismatch for {name}: expected {tuple(dst_tensor.shape)}, got {tuple(tensor.shape)}"
+            )
+        if dst_tensor.dtype != tensor.dtype:
+            errors.append(
+                f"dtype mismatch for {name}: expected {dst_tensor.dtype}, got {tensor.dtype}"
+            )
+
+    if errors:
+        return False, "In-place weight update rejected: " + "; ".join(errors[:20])
+
+    try:
+        with torch.no_grad():
+            for name, tensor in named_tensors:
+                if name in params_dict:
+                    dst_tensor = params_dict[name].data
+                else:
+                    dst_tensor = buffers_dict[name]
+
+                if dst_tensor.numel() == 1 and tensor.numel() == 1:
+                    dst_tensor.fill_(tensor.item())
+                else:
+                    dst_tensor.copy_(tensor)
+        return True, "Success"
+    except Exception as e:
+        return False, f"In-place weight update failed: {e}"
 
 
 def _unwrap_tensor(tensor, tp_rank, device):
