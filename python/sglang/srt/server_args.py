@@ -596,6 +596,7 @@ class ServerArgs:
     remote_instance_weight_loader_seed_instance_ip: Optional[str] = None
     remote_instance_weight_loader_seed_instance_service_port: Optional[int] = None
     remote_instance_weight_loader_send_weights_group_ports: Optional[List[int]] = None
+    online_weight_update_require_writer_lock: bool = False
 
     # For PD-Multiplexing
     enable_pdmux: bool = False
@@ -4080,6 +4081,11 @@ class ServerArgs:
             type=json_list_type,
             default=ServerArgs.remote_instance_weight_loader_send_weights_group_ports,
             help="The communication group ports for loading weights from remote instance.",
+        )
+        parser.add_argument(
+            "--online-weight-update-require-writer-lock",
+            action="store_true",
+            help="If set, online weight updates will always acquire the model update writer lock as a safe-point barrier, even when generation is paused in-place.",
         )
 
         # For PD-Multiplexing
