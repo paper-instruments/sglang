@@ -416,15 +416,21 @@ class TokenizerCommunicatorMixin:
         if obj.abort_all_requests:
             self.abort_request(abort_all=True)
 
-        # Immediately update the weights if the engine is in paused state
-        async with self.is_pause_cond:
-            is_paused = self.is_pause
+        if self.server_args.online_weight_update_require_writer_lock:
+            # Safe-point barrier for in-flight updates (PipelineRL semantics).
+            async with self.model_update_lock.writer_lock:
+                results = await self.update_weights_from_distributed_communicator(obj)
+        else:
+            # Backwards-compatible behavior: if the engine is already paused, update
+            # immediately without waiting for a global safe-point barrier.
+            async with self.is_pause_cond:
+                is_paused = self.is_pause
 
-        lock_context = (
-            self.model_update_lock.writer_lock if not is_paused else nullcontext()
-        )
-        async with lock_context:
-            results = await self.update_weights_from_distributed_communicator(obj)
+            lock_context = (
+                self.model_update_lock.writer_lock if not is_paused else nullcontext()
+            )
+            async with lock_context:
+                results = await self.update_weights_from_distributed_communicator(obj)
 
         success, message = _Communicator.merge_results(results)
         if success and obj.weight_version is not None:
@@ -474,15 +480,21 @@ class TokenizerCommunicatorMixin:
         if obj.abort_all_requests:
             self.abort_request(abort_all=True)
 
-        # Immediately update the weights if the engine is in paused state
-        async with self.is_pause_cond:
-            is_paused = self.is_pause
+        if self.server_args.online_weight_update_require_writer_lock:
+            # Safe-point barrier for in-flight updates (PipelineRL semantics).
+            async with self.model_update_lock.writer_lock:
+                results = await self.update_weights_from_tensor_communicator(obj)
+        else:
+            # Backwards-compatible behavior: if the engine is already paused, update
+            # immediately without waiting for a global safe-point barrier.
+            async with self.is_pause_cond:
+                is_paused = self.is_pause
 
-        lock_context = (
-            self.model_update_lock.writer_lock if not is_paused else nullcontext()
-        )
-        async with lock_context:
-            results = await self.update_weights_from_tensor_communicator(obj)
+            lock_context = (
+                self.model_update_lock.writer_lock if not is_paused else nullcontext()
+            )
+            async with lock_context:
+                results = await self.update_weights_from_tensor_communicator(obj)
 
         success, message = _Communicator.merge_results(results)
         if success and obj.weight_version is not None:
