@@ -593,6 +593,7 @@ class ServerArgs:
     # For model weight update and weight loading
     custom_weight_loader: Optional[List[str]] = None
     weight_loader_disable_mmap: bool = False
+    online_weight_update_inplace_copy: bool = False
     remote_instance_weight_loader_seed_instance_ip: Optional[str] = None
     remote_instance_weight_loader_seed_instance_service_port: Optional[int] = None
     remote_instance_weight_loader_send_weights_group_ports: Optional[List[int]] = None
@@ -4062,6 +4063,11 @@ class ServerArgs:
             "--weight-loader-disable-mmap",
             action="store_true",
             help="Disable mmap while loading weight using safetensors.",
+        )
+        parser.add_argument(
+            "--online-weight-update-inplace-copy",
+            action="store_true",
+            help="If set, online weight updates are applied by copying into existing parameter/buffer storages (no rebind/realloc). Updates fail closed on missing keys or shape/dtype mismatch.",
         )
         parser.add_argument(
             "--remote-instance-weight-loader-seed-instance-ip",
