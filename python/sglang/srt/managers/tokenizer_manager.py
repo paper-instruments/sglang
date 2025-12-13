@@ -62,6 +62,7 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterReqInput,
     OpenSessionReqOutput,
     PauseGenerationReqInput,
+    PauseGenerationReqOutput,
     SessionParams,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
@@ -325,6 +326,13 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         self.model_update_result: Optional[Awaitable[UpdateWeightFromDiskReqOutput]] = (
             None
         )
+
+        # Pause safe-point acks
+        self._pause_safe_future: Optional[asyncio.Future] = None
+        self._pause_safe_expected: int = 0
+        self._pause_safe_seen: int = 0
+        self._pause_safe_results: List[PauseGenerationReqOutput] = []
+
         self.is_pause = False
         self.is_pause_cond = asyncio.Condition()
 
@@ -392,6 +400,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 ),
                 (AbortReq, self._handle_abort_req),
                 (OpenSessionReqOutput, self._handle_open_session_req_output),
+                (PauseGenerationReqOutput, self._handle_pause_generation_req_output),
                 (
                     UpdateWeightFromDiskReqOutput,
                     self._handle_update_weights_from_disk_req_output,
@@ -1172,19 +1181,41 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             )
 
     async def pause_generation(self, obj: PauseGenerationReqInput):
+        self.auto_create_handle_loop()
+
         async with self.is_pause_cond:
             self.is_pause = True
-            if obj.mode != "abort":
+
+        if obj.mode == "abort":
+            # We are using the model_update_lock to check if there are still ongoing requests.
+            while True:
+                # TODO: maybe make it async instead of fire-and-forget
+                self.abort_request(abort_all=True)
+                is_locked = await self.model_update_lock.is_locked()
+                if not is_locked:
+                    break
+                await asyncio.sleep(1.0)
+            return
+
+        if obj.mode == "in_place_safe":
+            if self._pause_safe_future is not None and not self._pause_safe_future.done():
+                raise RuntimeError("pause_generation(in_place_safe) already in progress")
+
+            self._pause_safe_future = asyncio.Future()
+            self._pause_safe_expected = self.server_args.dp_size
+            self._pause_safe_seen = 0
+            self._pause_safe_results = []
+            try:
                 await self.send_to_scheduler.send_pyobj(obj)
-            else:
-                # we are using the model_update_lock to check if there is still on-going requests.
-                while True:
-                    # TODO: maybe make it async instead of fire-and-forget
-                    self.abort_request(abort_all=True)
-                    is_locked = await self.model_update_lock.is_locked()
-                    if not is_locked:
-                        break
-                    await asyncio.sleep(1.0)
+                await asyncio.wait_for(self._pause_safe_future, timeout=10)
+            finally:
+                self._pause_safe_future = None
+                self._pause_safe_expected = 0
+                self._pause_safe_seen = 0
+                self._pause_safe_results = []
+            return
+
+        await self.send_to_scheduler.send_pyobj(obj)
 
     async def continue_generation(self, obj: ContinueGenerationReqInput):
         async with self.is_pause_cond:
@@ -1983,6 +2014,27 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         self.session_futures[recv_obj.session_id].set_result(
             recv_obj.session_id if recv_obj.success else None
         )
+
+    def _handle_pause_generation_req_output(self, recv_obj: PauseGenerationReqOutput):
+        if self._pause_safe_future is None:
+            return
+
+        self._pause_safe_results.append(recv_obj)
+        self._pause_safe_seen += 1
+
+        if self._pause_safe_seen < self._pause_safe_expected:
+            return
+
+        if self._pause_safe_future.done():
+            return
+
+        all_success = all(r.success for r in self._pause_safe_results)
+        if all_success:
+            self._pause_safe_future.set_result(self._pause_safe_results)
+        else:
+            messages = [r.message for r in self._pause_safe_results if r.message]
+            msg = " | ".join(messages) if messages else "unknown error"
+            self._pause_safe_future.set_exception(RuntimeError(msg))
 
     def _handle_update_weights_from_disk_req_output(self, recv_obj):
         if self.server_args.dp_size == 1:

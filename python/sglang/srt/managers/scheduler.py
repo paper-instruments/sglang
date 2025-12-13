@@ -96,6 +96,7 @@ from sglang.srt.managers.io_struct import (
     OpenSessionReqInput,
     OpenSessionReqOutput,
     PauseGenerationReqInput,
+    PauseGenerationReqOutput,
     ProfileReq,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
@@ -2513,7 +2514,7 @@ class Scheduler(
 
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             chunked_req_to_exclude = set()
-            if recv_req.mode == "in_place":
+            if recv_req.mode in ("in_place", "in_place_safe"):
                 if self.chunked_req is not None:
                     chunked_req_to_exclude.add(self.chunked_req)
             self.last_batch.filter_batch(
@@ -2533,6 +2534,34 @@ class Scheduler(
 
             self.running_batch.batch_is_full = False
             self.chunked_req = None
+
+        if recv_req.mode == "in_place_safe":
+            try:
+                # Ensure there are no in-flight kernels on this rank.
+                if self.device not in (None, "cpu"):
+                    device_module = torch.get_device_module(self.device)
+                    synchronize = getattr(device_module, "synchronize", None)
+                    if synchronize is not None:
+                        synchronize()
+
+                # Ensure all ranks reach the safe point before acknowledging.
+                if (
+                    torch.distributed.is_initialized()
+                    and self.cpu_group is not None
+                    and torch.distributed.get_world_size(group=self.cpu_group) > 1
+                ):
+                    barrier(group=self.cpu_group)
+
+                return PauseGenerationReqOutput(
+                    success=True, mode=recv_req.mode, message="paused_safe"
+                )
+            except Exception as e:
+                logger.exception("pause_generation(in_place_safe) failed")
+                return PauseGenerationReqOutput(
+                    success=False, mode=recv_req.mode, message=str(e)
+                )
+
+        return None
 
     def continue_generation(self, recv_req: ContinueGenerationReqInput):
         self._engine_paused = False

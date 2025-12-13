@@ -1113,16 +1113,29 @@ class PauseGenerationReqInput(BaseReq):
             requests will be retracted back to the waiting_queue.
             Note: The KV cache can be flushed in this mode and will be automatically
             recomputed after continue_generation.
+
+    in_place_safe: Like in_place (pause scheduling without draining), but blocks
+            until the scheduler reaches a safe point (no in-flight forwards)
+            before returning.
     """
 
-    mode: Literal["abort", "retract", "in_place"] = "abort"
+    mode: Literal["abort", "retract", "in_place", "in_place_safe"] = "abort"
 
     def __post_init__(self):
-        allowed = ["abort", "retract", "in_place"]
+        allowed = ["abort", "retract", "in_place", "in_place_safe"]
         if self.mode not in allowed:
             raise ValueError(
                 f"Invalid mode: {self.mode!r}. " f"Expected one of {allowed}."
             )
+
+
+@dataclass
+class PauseGenerationReqOutput(BaseReq):
+    """Internal scheduler->tokenizer ack for PauseGenerationReqInput."""
+
+    success: bool
+    mode: str
+    message: str = ""
 
 
 @dataclass
