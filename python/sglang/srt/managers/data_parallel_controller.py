@@ -164,7 +164,8 @@ class DataParallelController:
 
         if server_args.enable_dp_attention:
             self.launch_dp_attention_schedulers(server_args, port_args)
-            self.control_message_step = server_args.tp_size
+            # One worker socket per DP rank; send control messages to all DP ranks.
+            self.control_message_step = 1
         else:
             self.launch_dp_schedulers(server_args, port_args)
             self.control_message_step = 1
@@ -176,7 +177,7 @@ class DataParallelController:
             worker.send_pyobj(obj)
 
     def send_control_message(self, obj):
-        # Send control messages to first worker of tp group
+        # Send control messages to each DP worker.
         for worker in self.workers[:: self.control_message_step]:
             worker.send_pyobj(obj)
 
