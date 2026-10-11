@@ -356,11 +356,18 @@ class SchedulerBatchResultProcessor:
                         )
                     else:
                         # req output_ids are set here
+                        previous_output_len = len(req.output_ids)
                         req.output_ids.append(next_token_id)
 
-                        self._maybe_update_reasoning_tokens(req, next_token_id)
-
                         req.update_finish_state()
+                        if req.require_reasoning:
+                            retained_tokens = list(
+                                req.output_ids[previous_output_len : req.finished_len]
+                            )
+                            if retained_tokens:
+                                self._maybe_update_reasoning_tokens(
+                                    req, retained_tokens
+                                )
                     # A mixed spec tail committed its pending bonus token; advance
                     # so the next spec prepare_for_decode reserves from the right base.
                     if (
@@ -1011,19 +1018,27 @@ class SchedulerBatchResultProcessor:
                 sampling_mask_finish_reason = self.get_sampling_mask_finish_reason(
                     status=status
                 )
+            previous_output_len = len(req.output_ids)
             if sampling_mask_finish_reason is not None:
                 req.to_finish = sampling_mask_finish_reason
                 new_accept_len = 0
             else:
                 req.output_ids.extend(next_token_id)
                 new_accept_len = len(next_token_id)
-                self._maybe_update_reasoning_tokens(req, next_token_id)
             req.update_finish_state(new_accept_len)
 
             if sampling_mask_finish_reason is not None:
                 self._handle_sampling_mask_abort(req)
                 continue
 
+            # Finish handling can cut a speculative run short. Only retained
+            # tokens contribute to reasoning usage and the think-end matcher.
+            if req.require_reasoning:
+                retained_tokens = list(
+                    req.output_ids[previous_output_len : req.finished_len]
+                )
+                if retained_tokens:
+                    self._maybe_update_reasoning_tokens(req, retained_tokens)
             self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
 
             if req.return_logprob:

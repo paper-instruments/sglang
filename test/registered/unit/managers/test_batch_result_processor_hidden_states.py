@@ -179,6 +179,7 @@ class _PrefillReq:
 
 class _DecodeReq:
     def __init__(self):
+        self.require_reasoning = False
         self.return_hidden_states = "last"
         self.hidden_states = []
         self.output_ids = []

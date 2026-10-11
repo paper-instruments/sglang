@@ -1,11 +1,13 @@
-"""Unit tests for Spec V2 grammar truncation in _resolve_spec_v2_tokens.
+"""Unit tests for Spec V2 grammar truncation and reasoning token accounting.
 
-The grammar-constrained spec path stops accepting at the grammar-terminating
-token, so the over-drafted suffix is never committed to KV nor emitted.
+Grammar truncation and output stops retain a prefix of accepted tokens.
+Reasoning accounting must consume only that prefix, including across batches.
 """
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -15,6 +17,8 @@ from sglang.srt.managers.scheduler_components.batch_result_processor import (
     SchedulerBatchResultProcessor,
 )
 from sglang.srt.managers.utils import GenerationBatchResult
+from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
+from sglang.srt.runtime_context import get_context
 from sglang.srt.sampling.sampling_params import (
     REQUEST_REASONING_END_TOKEN_IDS_KEY,
     SamplingParams,
@@ -87,8 +91,10 @@ def _make_processor() -> SchedulerBatchResultProcessor:
     )
 
 
-def _make_req(terminate_after: int) -> Req:
-    sp = SamplingParams(max_new_tokens=256, temperature=0)
+def _make_req(
+    terminate_after: int | None = None, *, max_new_tokens=256, **sampling_kwargs
+) -> Req:
+    sp = SamplingParams(max_new_tokens=max_new_tokens, temperature=0, **sampling_kwargs)
     sp.normalize(None)
     req = Req(
         rid="r0",
@@ -96,7 +102,8 @@ def _make_req(terminate_after: int) -> Req:
         origin_input_ids=[1, 2, 3],
         sampling_params=sp,
     )
-    req.grammar = _FakeGrammar(terminate_after=terminate_after)
+    if terminate_after is not None:
+        req.grammar = _FakeGrammar(terminate_after=terminate_after)
     req.kv.kv_committed_len = 0
     return req
 
@@ -107,6 +114,36 @@ def _make_result(num_draft_tokens, accept_lens, flat_tokens):
         accept_lens=torch.tensor(accept_lens, dtype=torch.long),
         speculative_num_draft_tokens=num_draft_tokens,
     )
+
+
+def _make_reasoning_req(max_new_tokens=256, **sampling_kwargs):
+    req = _make_req(max_new_tokens=max_new_tokens, **sampling_kwargs)
+    req.require_reasoning = True
+    req.eos_token_ids = {2}
+    return req
+
+
+def _make_reasoning_processor():
+    return replace(
+        _make_processor(),
+        model_config=SimpleNamespace(think_end_ids=[7, 8]),
+        token_to_kv_pool_allocator=Mock(),
+        metrics_reporter=Mock(num_generated_tokens=0, forward_ct_decode=0),
+        output_streamer=Mock(),
+    )
+
+
+def _decode_reasoning_tokens(processor, req, tokens):
+    batch = _FakeBatch([req])
+    batch.return_logprob = False
+    batch.batch_size = lambda: 1
+    result = _make_result(len(tokens), [len(tokens)], tokens)
+    # Exercise real normalization, append, finish and reasoning accounting;
+    # cache release/checkpointing is outside this regression.
+    with patch.object(
+        SchedulerBatchResultProcessor, "_handle_finish_state_updated_req"
+    ):
+        processor.process_batch_result_decode(batch, result)
 
 
 def _commit_disagg_handoff(
@@ -178,6 +215,92 @@ class TestSpecV2GrammarTruncation(CustomTestCase):
 
 
 class TestReasoningTokenAccounting(CustomTestCase):
+    def setUp(self):
+        super().setUp()
+        override = get_context().override_server_args(enable_metrics=False)
+        override.install()
+        self.addCleanup(override.restore)
+
+    def test_speculative_reasoning_counts_only_retained_prefix(self):
+        cases = [
+            ("length", 24, {}, [11, 12, 13, 14], 24),
+            ("eos", 256, {}, [11, 2, 13, 14], 24),
+            ("stop_token", 256, {"stop_token_ids": {3}}, [11, 3, 13, 14], 24),
+            ("no_cutoff", 256, {}, [11, 12, 13, 14], 26),
+        ]
+        for name, cap, params, tokens, retained in cases:
+            with self.subTest(name=name):
+                req = _make_reasoning_req(cap, **params)
+                processor = _make_reasoning_processor()
+                _decode_reasoning_tokens(processor, req, [10] * 22)
+                _decode_reasoning_tokens(processor, req, tokens)
+                self.assertEqual(len(req.output_ids_through_stop), retained)
+                self.assertEqual(req.reasoning_tokens, retained)
+
+    def test_think_end_respects_speculative_cutoff(self):
+        cases = [
+            # Reasoning, end marker, answer, and EOS share an accepted batch.
+            ([10, 7, 8, 11, 2, 12], 256, 5, 3, True, 0),
+            # End straddles the cap: only its partial match survives.
+            ([11, 7, 8, 12], 2, 2, 2, False, 1),
+            # Discarded tokens must not start or complete a marker.
+            ([11, 2, 7, 8], 256, 2, 2, False, 0),
+        ]
+        for tokens, cap, retained, reasoning, over, match_len in cases:
+            with self.subTest(tokens=tokens, cap=cap):
+                req = _make_reasoning_req(cap)
+                _decode_reasoning_tokens(_make_reasoning_processor(), req, tokens)
+                self.assertEqual(len(req.output_ids_through_stop), retained)
+                self.assertEqual(req.reasoning_tokens, reasoning)
+                self.assertEqual(req._is_reasoning_over, over)
+                if not over:
+                    self.assertEqual(req._think_end_match_len, match_len)
+
+    def test_think_end_across_batches_at_cutoff(self):
+        for tokens, over in (([8, 11], True), ([7, 8], False)):
+            with self.subTest(tokens=tokens):
+                req = _make_reasoning_req(3)
+                processor = _make_reasoning_processor()
+                _decode_reasoning_tokens(processor, req, [10, 7])
+                _decode_reasoning_tokens(processor, req, tokens)
+                self.assertEqual(len(req.output_ids_through_stop), 3)
+                self.assertEqual(req.reasoning_tokens, 3)
+                self.assertEqual(req._is_reasoning_over, over)
+                if not over:
+                    self.assertEqual(req._think_end_match_len, 1)
+
+    def test_prefill_reasoning_counts_only_retained_token(self):
+        for cap in (0, 1):
+            with self.subTest(cap=cap):
+                req = _make_reasoning_req(cap)
+                batch = SimpleNamespace(
+                    reqs=[req],
+                    return_logprob=False,
+                    return_hidden_states=False,
+                    return_hidden_states_mode=CaptureHiddenMode.NULL,
+                    spec_info=None,
+                    decoding_reqs=None,
+                    forward_mode=ForwardMode.EXTEND,
+                    prefill_stats=None,
+                )
+                result = GenerationBatchResult(next_token_ids=torch.tensor([7]))
+                with (
+                    patch(
+                        "sglang.srt.managers.scheduler_components."
+                        "batch_result_processor.release_kv_cache"
+                    ),
+                    patch(
+                        "sglang.srt.managers.scheduler_components."
+                        "batch_result_processor.checkpoint_kv_cache"
+                    ),
+                ):
+                    _make_reasoning_processor().process_batch_result_prefill(
+                        batch, result
+                    )
+                self.assertEqual(len(req.output_ids_through_stop), cap)
+                self.assertEqual(req.reasoning_tokens, cap)
+                self.assertEqual(req._think_end_match_len, cap)
+
     def test_multi_token_end_can_span_decode_steps(self):
         req = _make_req(terminate_after=99)
         req.require_reasoning = True
