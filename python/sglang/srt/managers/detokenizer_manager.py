@@ -200,7 +200,10 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
 
         # Trim stop str.
         if isinstance(matched, str) and isinstance(output, str):
-            pos = output.find(matched)
+            # The real hit comes from the newest tokens, so anchor on the last
+            # occurrence: with reasoning, the decoded text also holds the thinking,
+            # where the model may have quoted the stop string earlier.
+            pos = output.rfind(matched)
             if pos == -1:
                 return output
             end = pos + len(matched)

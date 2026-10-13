@@ -358,6 +358,7 @@ class SchedulerBatchResultProcessor:
                         # req output_ids are set here
                         previous_output_len = len(req.output_ids)
                         req.output_ids.append(next_token_id)
+                        self._observe_answer_start(req, [next_token_id])
 
                         req.update_finish_state()
                         if req.require_reasoning:
@@ -1023,6 +1024,7 @@ class SchedulerBatchResultProcessor:
             else:
                 req.output_ids.extend(next_token_id)
                 new_accept_len = len(next_token_id)
+                self._observe_answer_start(req, next_token_id)
             req.update_finish_state(new_accept_len)
 
             if sampling_mask_finish_reason is not None:
@@ -1449,6 +1451,25 @@ class SchedulerBatchResultProcessor:
             req.time_stats.set_completion_time()
 
         self._maybe_collect_customized_info(i, req, logits_output)
+
+    def _observe_answer_start(self, req: Req, new_tokens: List[int]) -> None:
+        # User stops delimit the answer, so the finish check must know where it starts
+        # within this commit; reasoning accounting runs later, on retained tokens.
+        if not req.require_reasoning or req._answer_start is not None:
+            return
+        think_end_ids = None
+        if req._answer_matcher is None:
+            think_end_ids = get_request_reasoning_end_token_ids(
+                req.sampling_params.custom_params,
+                allowed_sequences=getattr(
+                    self.model_config,
+                    "request_selectable_think_end_id_sequences",
+                    None,
+                ),
+            )
+            if think_end_ids is None:
+                think_end_ids = self.model_config.think_end_ids
+        req.observe_answer_start(new_tokens, think_end_ids)
 
     def _maybe_update_reasoning_tokens(
         self,

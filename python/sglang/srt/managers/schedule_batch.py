@@ -1109,6 +1109,13 @@ class Req(ReqDllmMixin):
         self.reasoning_tokens = 0
         self._think_end_matcher: Optional[TokenSequenceMatcher] = None
         self._think_end_match_len = 0
+        # User stops delimit the final answer, not the thinking. The scheduler finds
+        # the think-end marker in each commit before finish checks run
+        # (`observe_answer_start`); reasoning accounting still counts only retained
+        # tokens afterwards. output_ids index of the first answer token, once known.
+        self._answer_start: Optional[int] = None
+        self._answer_matcher: Optional[TokenSequenceMatcher] = None
+        self._answer_match_len = 0
 
         # Sampling info
         if isinstance(sampling_params.custom_params, dict):
@@ -1702,9 +1709,42 @@ class Req(ReqDllmMixin):
         )
         # Cover all newly accepted tokens so an early stop string is not missed
         # when speculative decoding accepts multiple tokens per step.
-        return min(
-            max_len_tail_str + max(new_accepted_len - 1, 0), len(self.output_ids)
-        )
+        available = len(self.output_ids)
+        if self.require_reasoning:
+            # Match only answer tokens, so a stop the model quotes while reasoning
+            # (or right before the think-end marker) cannot end the request.
+            if self._answer_start is None:
+                return 0
+            available -= self._answer_start
+        return min(max_len_tail_str + max(new_accepted_len - 1, 0), available)
+
+    def _in_answer(self, position: int) -> bool:
+        """Whether output position ``position`` is answer text, where user stops apply."""
+        if not self.require_reasoning:
+            return True
+        return self._answer_start is not None and position >= self._answer_start
+
+    def observe_answer_start(
+        self, new_tokens: List[int], think_end_ids: Optional[List[int]]
+    ) -> None:
+        """Record where the answer starts if this commit (already appended to
+        output_ids) ends the reasoning. Without a think-end marker, all output is in
+        scope for user stops, as before."""
+        if self._answer_start is not None:
+            return
+        if not think_end_ids:
+            self._answer_start = 0
+            return
+        if self._answer_matcher is None:
+            self._answer_matcher = TokenSequenceMatcher(think_end_ids)
+        first_position = len(self.output_ids) - len(new_tokens)
+        matched = self._answer_match_len
+        for position, token in enumerate(new_tokens):
+            matched = self._answer_matcher.advance(matched, int(token))
+            if matched == len(self._answer_matcher):
+                self._answer_start = first_position + position + 1
+                return
+        self._answer_match_len = matched
 
     def tail_str(self, new_accepted_len: int = 1) -> str:
         # Check stop strings and stop regex patterns together
@@ -1715,6 +1755,8 @@ class Req(ReqDllmMixin):
             return ""
 
         tail_len = self._stop_match_tail_len(new_accepted_len)
+        if tail_len <= 0:
+            return ""
         return self.tokenizer.decode(self.output_ids[-tail_len:])
 
     def check_match_stop_str_prefix(self) -> bool:
@@ -1749,9 +1791,13 @@ class Req(ReqDllmMixin):
 
         # Check stop token ids
         matched_eos = False
+        first_position = len(self.output_ids) - len(new_accepted_tokens)
 
         for i, token_id in enumerate(new_accepted_tokens):
-            if self.sampling_params.stop_token_ids:
+            # User stop_token_ids delimit the final answer, so they apply only from the
+            # first answer token (a speculative commit can span the think-end marker);
+            # system EOS and chat-stop tokens below always apply.
+            if self.sampling_params.stop_token_ids and self._in_answer(first_position + i):
                 matched_eos |= token_id in self.sampling_params.stop_token_ids
             if self.eos_token_ids:
                 matched_eos |= token_id in self.eos_token_ids
@@ -1895,10 +1941,14 @@ class Req(ReqDllmMixin):
             self._cap_finished_len_at_max_new_tokens()
             return
 
+        # User stop strings and regex delimit the final answer, so they are not
+        # checked while the model is still reasoning.
+        in_reasoning = self.require_reasoning and self._answer_start is None
+
         # Stop string beats EOS/stop-token matched in the same step (speculative
         # decoding can accept >1 token): token-based would trim only the last
         # token and leak the stop string.
-        if self._check_str_based_finish(new_accepted_len):
+        if not in_reasoning and self._check_str_based_finish(new_accepted_len):
             self._cap_finished_len_at_max_new_tokens()
             return
 
