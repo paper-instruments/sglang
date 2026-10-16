@@ -574,6 +574,18 @@ class AnthropicServing:
                 continuous_usage_stats=True,
             )
 
+        if anthropic_request.output_config is not None:
+            output_format = anthropic_request.output_config.format
+            if output_format is not None:
+                request_data["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "anthropic_response",
+                        "schema": output_format.schema_,
+                        "strict": True,
+                    },
+                }
+
         chat_request = ChatCompletionRequest(**request_data)
 
         if anthropic_request.thinking is not None:

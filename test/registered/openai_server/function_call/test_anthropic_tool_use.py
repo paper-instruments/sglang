@@ -134,6 +134,45 @@ class TestAnthropicToolUse(CustomTestCase):
 
     # ---- Non-streaming tool use tests ----
 
+    def test_output_config_json_schema(self):
+        schema = {
+            "type": "object",
+            "properties": {"marker": {"type": "string", "enum": ["SCHEMA_VALUE"]}},
+            "required": ["marker"],
+            "additionalProperties": False,
+        }
+        for streaming in (False, True):
+            with self.subTest(stream=streaming):
+                response = self._make_request(
+                    {
+                        "model": self.model,
+                        "max_tokens": 512,
+                        "temperature": 0,
+                        "stream": streaming,
+                        "messages": [
+                            {"role": "user", "content": "Reply exactly NOT_JSON."}
+                        ],
+                        "output_config": {
+                            "format": {"type": "json_schema", "schema": schema}
+                        },
+                    },
+                    stream=streaming,
+                )
+                self.assertEqual(response.status_code, 200)
+                if streaming:
+                    events = self._parse_sse_events(response)
+                    self.assertEqual(events[-1]["type"], "message_stop")
+                    text = "".join(
+                        event.get("delta", {}).get("text", "") for event in events
+                    )
+                else:
+                    text = "".join(
+                        block["text"]
+                        for block in response.json()["content"]
+                        if block["type"] == "text"
+                    )
+                self.assertEqual(json.loads(text), {"marker": "SCHEMA_VALUE"})
+
     def test_tool_use_format(self):
         """Test that tool use returns proper Anthropic content blocks."""
         payload = {

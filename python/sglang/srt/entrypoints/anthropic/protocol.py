@@ -327,16 +327,23 @@ class AnthropicTaskBudget(BaseModel):
     remaining: Optional[int] = Field(default=None, ge=0)
 
 
+class AnthropicJSONOutputFormat(BaseModel):
+    type: Literal["json_schema"]
+    schema_: dict[str, Any] = Field(alias="schema")
+
+
 class AnthropicOutputConfig(BaseModel):
     """Claude 4.7 ``output_config`` block.
 
     ``effort`` maps to the OpenAI ``reasoning_effort`` knob (``xhigh`` →
     ``max`` because the OpenAI Literal does not include ``xhigh``).
-    ``task_budget`` is propagated as a custom-param hint.
+    ``task_budget`` is propagated as a custom-param hint. ``format`` maps to
+    the existing constrained-decoding response format.
     """
 
     effort: Optional[Literal["minimal", "low", "medium", "high", "xhigh", "max"]] = None
     task_budget: Optional[AnthropicTaskBudget] = None
+    format: Optional[AnthropicJSONOutputFormat] = None
 
 
 class AnthropicCountTokensRequest(BaseModel):
