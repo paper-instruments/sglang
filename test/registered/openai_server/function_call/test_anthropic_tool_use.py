@@ -106,6 +106,45 @@ class TestAnthropicToolUse(CustomTestCase):
     def tearDownClass(cls):
         kill_process_tree(cls.process.pid)
 
+    def test_unsupported_tool_constraint_combinations(self):
+        for stream in (False, True):
+            for choice in ("auto", "any", "tool"):
+                payload = {
+                    "model": self.model,
+                    "max_tokens": 128,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "Use add"}],
+                    "tools": [{**ADD_TOOL, "strict": True}],
+                    "tool_choice": {
+                        "type": choice,
+                        **({"name": "add"} if choice == "tool" else {}),
+                    },
+                    "output_config": {
+                        "format": {"type": "json_schema", "schema": {"type": "object"}}
+                    },
+                }
+                with self.subTest(stream=stream, choice=choice):
+                    response = self._make_request(payload, stream=stream)
+                    self.assertEqual(response.status_code, 400)
+                    error = response.json()["error"]
+                    self.assertEqual(error["type"], "invalid_request_error")
+                    self.assertIn("output_config.format", error["message"])
+                    self.assertIn("active tools", error["message"])
+
+            # This fixture's llama3 parser has no native single-call grammar;
+            # accepting the flag must not silently leave calls unconstrained.
+            payload.pop("output_config")
+            payload["tools"] = [ADD_TOOL]
+            payload["tool_choice"] = {
+                "type": "auto",
+                "disable_parallel_tool_use": True,
+            }
+            response = self._make_request(payload, stream=stream)
+            self.assertEqual(response.status_code, 400)
+            self.assertIn(
+                "disable_parallel_tool_use", response.json()["error"]["message"]
+            )
+
     def _make_request(self, payload, stream=False):
         """Send a request to the /v1/messages endpoint."""
         headers = {

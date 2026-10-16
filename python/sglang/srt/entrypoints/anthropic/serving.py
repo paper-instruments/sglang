@@ -47,11 +47,13 @@ from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
+    LegacyStructuralTagResponseFormat,
     StreamOptions,
     Tool,
     ToolChoice,
     ToolChoiceFuncName,
 )
+from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.observability.req_time_stats import monotonic_time
 
 if TYPE_CHECKING:
@@ -682,6 +684,7 @@ class AnthropicServing:
                             "name": tool.name,
                             "description": tool.description or "",
                             "parameters": tool.input_schema,
+                            "strict": tool.strict,
                         },
                     )
                 )
@@ -695,6 +698,9 @@ class AnthropicServing:
         # no tool the model could call. Silently downgrading to "no tool"
         # would deceive the caller, so raise an explicit 400.
         if anthropic_request.tool_choice is not None:
+            chat_request.parallel_tool_calls = (
+                not anthropic_request.tool_choice.disable_parallel_tool_use
+            )
             tc_type = anthropic_request.tool_choice.type
             if tc_type == "none":
                 chat_request.tool_choice = "none"
@@ -731,7 +737,55 @@ class AnthropicServing:
         elif chat_request.tools:
             chat_request.tool_choice = "auto"
 
+        self._validate_tool_constraints(chat_request)
         return chat_request
+
+    def _validate_tool_constraints(self, request: ChatCompletionRequest) -> None:
+        """Refuse controls the selected parser cannot enforce before generation.
+
+        The same parser constructs the generation constraint in serving_chat.
+        Legacy structural tags enforce argument schemas but cannot limit the
+        number of triggered calls. Do not silently advertise that guarantee.
+        """
+        if not request.tools or request.tool_choice == "none":
+            return
+        if request.response_format is not None:
+            raise ValueError(
+                "output_config.format cannot be combined with active tools: "
+                "the output and tool grammars cannot both be enforced. Set "
+                "tool_choice.type='none' for the formatted final answer, or "
+                "request tool use and formatted output in separate turns."
+            )
+        strict = any(tool.function.strict for tool in request.tools)
+        single = not request.parallel_tool_calls
+        if not strict and not single:
+            return
+        controls = "tools[].strict / tool_choice.disable_parallel_tool_use"
+        parser_name = self.openai_serving_chat.tool_call_parser
+        if not parser_name:
+            raise ValueError(f"{controls} require a configured tool-call parser")
+        parser = FunctionCallParser(request.tools, parser_name)
+        constraint = parser.get_structure_constraint(
+            request.tool_choice, parallel_tool_calls=request.parallel_tool_calls
+        )
+        if constraint is None:
+            raise ValueError(
+                f"{controls} cannot be enforced by tool-call parser {parser_name!r} "
+                "with this tool_choice and schema"
+            )
+        if single and (
+            constraint[0] not in ("full_assistant_ebnf", "structural_tag")
+            or isinstance(constraint[1], LegacyStructuralTagResponseFormat)
+            or (
+                constraint[0] == "structural_tag"
+                and parser.detector.get_structural_tag_name() is None
+            )
+        ):
+            raise ValueError(
+                "tool_choice.disable_parallel_tool_use cannot be enforced by "
+                f"tool-call parser {parser_name!r} with this tool_choice: "
+                "a native grammar supporting single-call limits is required"
+            )
 
     async def _handle_non_streaming(
         self,

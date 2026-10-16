@@ -104,6 +104,7 @@ class TestAnthropicOutputFormat(CustomTestCase):
                 },
             ],
             "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "none"},
             "output_config": {"effort": "high"},
         }
         before = copy.deepcopy(body)

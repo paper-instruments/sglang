@@ -14,6 +14,7 @@ from pydantic import (
     Discriminator,
     Field,
     NonNegativeInt,
+    StrictBool,
     Tag,
     field_validator,
     model_validator,
@@ -141,6 +142,7 @@ class AnthropicCustomTool(BaseModel):
     description: Optional[str] = None
     input_schema: dict[str, Any]
     defer_loading: Optional[bool] = None
+    strict: StrictBool = False
 
     @field_validator("input_schema")
     @classmethod
@@ -252,6 +254,7 @@ class AnthropicToolChoice(BaseModel):
 
     type: Literal["auto", "any", "tool", "none"]
     name: Optional[str] = None
+    disable_parallel_tool_use: StrictBool = False
 
 
 class AnthropicThinkingParam(BaseModel):
