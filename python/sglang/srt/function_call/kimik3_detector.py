@@ -82,6 +82,9 @@ class KimiK3Detector(BaseFormatDetector):
     def supports_structural_tag(self) -> bool:
         return True
 
+    def supports_single_call_constraint(self) -> bool:
+        return True
+
     def parses_required_natively(self) -> bool:
         return False
 

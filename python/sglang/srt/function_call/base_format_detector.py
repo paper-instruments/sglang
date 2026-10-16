@@ -388,6 +388,15 @@ class BaseFormatDetector(ABC):
         """Return the XGrammar model name for native structural tags, if supported."""
         return None
 
+    def supports_single_call_constraint(self) -> bool:
+        """Whether native structural tags enforce ``parallel_tool_calls=False``.
+
+        The built-in XGrammar model tags implement this contract. Custom tag
+        builders must opt in explicitly; accepting the argument alone is not
+        evidence that their grammar limits the number of calls.
+        """
+        return self.get_structural_tag_name() is not None
+
     def get_structural_tag(
         self,
         tools: Union[List[Tool], None] = None,

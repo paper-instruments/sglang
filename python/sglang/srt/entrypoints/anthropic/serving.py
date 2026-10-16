@@ -778,7 +778,7 @@ class AnthropicServing:
             or isinstance(constraint[1], LegacyStructuralTagResponseFormat)
             or (
                 constraint[0] == "structural_tag"
-                and parser.detector.get_structural_tag_name() is None
+                and not parser.detector.supports_single_call_constraint()
             )
         ):
             raise ValueError(
