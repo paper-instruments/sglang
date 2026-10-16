@@ -95,6 +95,9 @@ class TestAnthropicToolUse(CustomTestCase):
             other_args=[
                 "--tool-call-parser",
                 "llama3",
+                # Bound lexical whitespace so adversarial small-model schema
+                # probes cannot spend the output budget on whitespace alone.
+                "--constrained-json-disable-any-whitespace",
             ],
         )
         cls.messages_url = cls.base_url + "/v1/messages"
@@ -102,6 +105,45 @@ class TestAnthropicToolUse(CustomTestCase):
     @classmethod
     def tearDownClass(cls):
         kill_process_tree(cls.process.pid)
+
+    def test_unsupported_tool_constraint_combinations(self):
+        for stream in (False, True):
+            for choice in ("auto", "any", "tool"):
+                payload = {
+                    "model": self.model,
+                    "max_tokens": 128,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "Use add"}],
+                    "tools": [{**ADD_TOOL, "strict": True}],
+                    "tool_choice": {
+                        "type": choice,
+                        **({"name": "add"} if choice == "tool" else {}),
+                    },
+                    "output_config": {
+                        "format": {"type": "json_schema", "schema": {"type": "object"}}
+                    },
+                }
+                with self.subTest(stream=stream, choice=choice):
+                    response = self._make_request(payload, stream=stream)
+                    self.assertEqual(response.status_code, 400)
+                    error = response.json()["error"]
+                    self.assertEqual(error["type"], "invalid_request_error")
+                    self.assertIn("output_config.format", error["message"])
+                    self.assertIn("active tools", error["message"])
+
+            # This fixture's llama3 parser has no native single-call grammar;
+            # accepting the flag must not silently leave calls unconstrained.
+            payload.pop("output_config")
+            payload["tools"] = [ADD_TOOL]
+            payload["tool_choice"] = {
+                "type": "auto",
+                "disable_parallel_tool_use": True,
+            }
+            response = self._make_request(payload, stream=stream)
+            self.assertEqual(response.status_code, 400)
+            self.assertIn(
+                "disable_parallel_tool_use", response.json()["error"]["message"]
+            )
 
     def _make_request(self, payload, stream=False):
         """Send a request to the /v1/messages endpoint."""
@@ -133,6 +175,45 @@ class TestAnthropicToolUse(CustomTestCase):
         return events
 
     # ---- Non-streaming tool use tests ----
+
+    def test_output_config_json_schema(self):
+        schema = {
+            "type": "object",
+            "properties": {"marker": {"type": "string", "enum": ["SCHEMA_VALUE"]}},
+            "required": ["marker"],
+            "additionalProperties": False,
+        }
+        for streaming in (False, True):
+            with self.subTest(stream=streaming):
+                response = self._make_request(
+                    {
+                        "model": self.model,
+                        "max_tokens": 512,
+                        "temperature": 0,
+                        "stream": streaming,
+                        "messages": [
+                            {"role": "user", "content": "Reply exactly NOT_JSON."}
+                        ],
+                        "output_config": {
+                            "format": {"type": "json_schema", "schema": schema}
+                        },
+                    },
+                    stream=streaming,
+                )
+                self.assertEqual(response.status_code, 200)
+                if streaming:
+                    events = self._parse_sse_events(response)
+                    self.assertEqual(events[-1]["type"], "message_stop")
+                    text = "".join(
+                        event.get("delta", {}).get("text", "") for event in events
+                    )
+                else:
+                    text = "".join(
+                        block["text"]
+                        for block in response.json()["content"]
+                        if block["type"] == "text"
+                    )
+                self.assertEqual(json.loads(text), {"marker": "SCHEMA_VALUE"})
 
     def test_tool_use_format(self):
         """Test that tool use returns proper Anthropic content blocks."""

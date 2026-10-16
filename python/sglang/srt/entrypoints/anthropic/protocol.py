@@ -14,6 +14,7 @@ from pydantic import (
     Discriminator,
     Field,
     NonNegativeInt,
+    StrictBool,
     Tag,
     field_validator,
     model_validator,
@@ -141,6 +142,7 @@ class AnthropicCustomTool(BaseModel):
     description: Optional[str] = None
     input_schema: dict[str, Any]
     defer_loading: Optional[bool] = None
+    strict: StrictBool = False
 
     @field_validator("input_schema")
     @classmethod
@@ -252,6 +254,7 @@ class AnthropicToolChoice(BaseModel):
 
     type: Literal["auto", "any", "tool", "none"]
     name: Optional[str] = None
+    disable_parallel_tool_use: StrictBool = False
 
 
 class AnthropicThinkingParam(BaseModel):
@@ -327,16 +330,23 @@ class AnthropicTaskBudget(BaseModel):
     remaining: Optional[int] = Field(default=None, ge=0)
 
 
+class AnthropicJSONOutputFormat(BaseModel):
+    type: Literal["json_schema"]
+    schema_: dict[str, Any] = Field(alias="schema")
+
+
 class AnthropicOutputConfig(BaseModel):
     """Claude 4.7 ``output_config`` block.
 
     ``effort`` maps to the OpenAI ``reasoning_effort`` knob (``xhigh`` →
     ``max`` because the OpenAI Literal does not include ``xhigh``).
-    ``task_budget`` is propagated as a custom-param hint.
+    ``task_budget`` is propagated as a custom-param hint. ``format`` maps to
+    the existing constrained-decoding response format.
     """
 
     effort: Optional[Literal["minimal", "low", "medium", "high", "xhigh", "max"]] = None
     task_budget: Optional[AnthropicTaskBudget] = None
+    format: Optional[AnthropicJSONOutputFormat] = None
 
 
 class AnthropicCountTokensRequest(BaseModel):
