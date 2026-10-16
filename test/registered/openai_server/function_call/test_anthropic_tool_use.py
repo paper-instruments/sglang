@@ -95,6 +95,9 @@ class TestAnthropicToolUse(CustomTestCase):
             other_args=[
                 "--tool-call-parser",
                 "llama3",
+                # Bound lexical whitespace so adversarial small-model schema
+                # probes cannot spend the output budget on whitespace alone.
+                "--constrained-json-disable-any-whitespace",
             ],
         )
         cls.messages_url = cls.base_url + "/v1/messages"
