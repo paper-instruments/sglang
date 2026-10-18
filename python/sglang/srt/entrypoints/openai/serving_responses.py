@@ -104,6 +104,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _continuous_usage_event(
+    request: ResponsesRequest,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> dict[str, Any]:
+    usage = UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+    )
+    if cached_tokens:
+        usage.prompt_tokens_details = PromptTokenUsageInfo(cached_tokens=cached_tokens)
+    return {
+        "type": "response.usage",
+        "response_id": request.request_id,
+        "usage": ResponsesResponse.usage_payload(usage),
+    }
+
+
+def _wants_continuous_usage(request: ResponsesRequest) -> bool:
+    return bool(
+        request.stream_options and request.stream_options.continuous_usage_stats
+    )
+
+
 class _MediaInputValidationError(ValueError):
     pass
 
@@ -1837,6 +1866,22 @@ class OpenAIServingResponses(OpenAIServingChat):
         yield _send_event("response.in_progress", response=initial_response)
 
         async for ctx in result_generator:
+            if _wants_continuous_usage(request):
+                yield _send_event(
+                    "response.usage",
+                    response_id=request.request_id,
+                    usage=_continuous_usage_event(
+                        request,
+                        prompt_tokens=ctx.num_prompt_tokens,
+                        completion_tokens=ctx.num_output_tokens,
+                        cached_tokens=(
+                            ctx.num_cached_tokens
+                            if self.enable_prompt_tokens_details
+                            else 0
+                        ),
+                        reasoning_tokens=ctx.num_reasoning_tokens,
+                    )["usage"],
+                )
             for message in ctx.messages[num_messages:]:
                 for item in parse_output_message(message):
                     for event in _update_item(item, done=True):
@@ -1907,6 +1952,9 @@ class OpenAIServingResponses(OpenAIServingChat):
                 continue
             payload = orjson.loads(event.split("data: ", 1)[1])
             event_type = payload["type"]
+            if event_type == "response.usage":
+                yield event
+                continue
             item_type = payload.get("item", {}).get("type")
             opens_item = event_type == "response.output_item.added"
             if pending or (opens_item and item_type == "message"):
@@ -1953,13 +2001,17 @@ class OpenAIServingResponses(OpenAIServingChat):
 
         def _send_event(event):
             nonlocal sequence_number
-            if hasattr(event, "sequence_number"):
-                event.sequence_number = sequence_number
+            if isinstance(event, dict):
+                payload = {**event, "sequence_number": sequence_number}
+                event_type = payload["type"]
+            else:
+                if hasattr(event, "sequence_number"):
+                    event.sequence_number = sequence_number
+                event_type = getattr(event, "type", "unknown")
+                payload = event.model_dump()
+                if isinstance(getattr(event, "item", None), ResponseOutputMessage):
+                    payload["item"] = event.item.model_dump()
             sequence_number += 1
-            event_type = getattr(event, "type", "unknown")
-            payload = event.model_dump()
-            if isinstance(getattr(event, "item", None), ResponseOutputMessage):
-                payload["item"] = event.item.model_dump()
             return f"event: {event_type}\ndata: {orjson.dumps(payload).decode()}\n\n"
 
         # The streaming Response* event models echo ``tools`` through a
@@ -2307,6 +2359,21 @@ class OpenAIServingResponses(OpenAIServingChat):
                     "reasoning_tokens", reasoning_tokens_meta
                 )
                 finish_reason = meta.get("finish_reason") or finish_reason
+
+                if _wants_continuous_usage(request):
+                    yield _send_event(
+                        _continuous_usage_event(
+                            request,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            cached_tokens=(
+                                cached_tokens
+                                if self.enable_prompt_tokens_details
+                                else 0
+                            ),
+                            reasoning_tokens=reasoning_tokens_meta,
+                        )
+                    )
 
                 text = chunk.get("text", "") or ""
                 if incremental:

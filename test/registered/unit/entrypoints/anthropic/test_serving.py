@@ -365,6 +365,45 @@ class TestAnthropicServing(unittest.TestCase):
         self.assertNotIn("input_tokens", message_delta["usage"])
         self.assertEqual(message_delta["usage"]["output_tokens"], 2)
 
+    def test_stream_can_emit_continuous_cumulative_usage(self):
+        serving = self._serving(
+            [
+                _chunk(
+                    [_choice({"role": "assistant", "content": "a"})],
+                    usage={
+                        "prompt_tokens": 5,
+                        "completion_tokens": 1,
+                        "total_tokens": 6,
+                    },
+                ),
+                _chunk(
+                    [_choice({"content": "b"}, finish_reason="stop")],
+                    usage={
+                        "prompt_tokens": 5,
+                        "completion_tokens": 2,
+                        "total_tokens": 7,
+                    },
+                ),
+                "data: [DONE]\n\n",
+            ]
+        )
+
+        events = asyncio.run(
+            _collect_anthropic_events(
+                serving,
+                self._anthropic_request(
+                    stream_options={"continuous_usage_stats": True}
+                ),
+            )
+        )
+        deltas = [event for event in events if event["type"] == "message_delta"]
+        self.assertEqual(
+            [event["usage"]["output_tokens"] for event in deltas], [1, 2, 2]
+        )
+        self.assertEqual(deltas[0]["delta"], {})
+        self.assertEqual(deltas[1]["delta"], {})
+        self.assertEqual(deltas[-1]["delta"]["stop_reason"], "end_turn")
+
     def test_non_streaming_usage_subtracts_cache_read_tokens(self):
         response = ChatCompletionResponse.model_validate(
             {

@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from sglang.srt.entrypoints.openai.protocol import PDRoutingFields
+from sglang.srt.entrypoints.openai.protocol import PDRoutingFields, StreamOptions
 
 
 class AnthropicError(BaseModel):
@@ -368,6 +368,9 @@ class AnthropicMessagesRequest(PDRoutingFields):
     metadata: Optional[dict[str, Any]] = None
     stop_sequences: Optional[list[str]] = None
     stream: Optional[bool] = False
+    # SGLang extension. When enabled, streaming responses include cumulative
+    # usage snapshots before the terminal message_delta event.
+    stream_options: Optional[StreamOptions] = None
     system: Optional[Union[str, list[AnthropicContentBlock]]] = None
     temperature: Optional[float] = None
     thinking: Optional[AnthropicThinkingParam] = None

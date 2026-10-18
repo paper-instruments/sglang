@@ -215,6 +215,13 @@ class StreamingHarmonyContext(HarmonyContext):
                 new_token_ids = output_token_ids
                 self.num_processed_tokens += len(output_token_ids)
 
+            if "prompt_tokens" in meta_info:
+                self.num_prompt_tokens = meta_info["prompt_tokens"]
+            if "cached_tokens" in meta_info:
+                self.num_cached_tokens = meta_info["cached_tokens"]
+            self.num_output_tokens = self.num_processed_tokens
+            if "reasoning_tokens" in meta_info:
+                self.num_reasoning_tokens = meta_info["reasoning_tokens"]
             self._record_finish_reason(meta_info)
 
             for token_id in new_token_ids:
