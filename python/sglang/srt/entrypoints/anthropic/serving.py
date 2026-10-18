@@ -1110,8 +1110,23 @@ class AnthropicServing:
                     include_output=True,
                 )
 
+            continuous_usage = bool(
+                anthropic_request.stream_options
+                and anthropic_request.stream_options.continuous_usage_stats
+                and final_usage is not None
+            )
+
             # Usage-only chunk (empty choices with usage info)
             if not chunk.choices and chunk.usage:
+                for frame in _ensure_message_started(chunk.usage):
+                    yield frame
+                if continuous_usage:
+                    yield _emit(
+                        MessageDeltaEvent(
+                            delta=AnthropicMessageEndDelta(),
+                            usage=final_usage,
+                        )
+                    )
                 continue
 
             if not chunk.choices:
@@ -1149,6 +1164,14 @@ class AnthropicServing:
             ) and not message_started:
                 yield _emit(_message_start_event(chunk.usage))
                 message_started = True
+
+            if continuous_usage and message_started:
+                yield _emit(
+                    MessageDeltaEvent(
+                        delta=AnthropicMessageEndDelta(),
+                        usage=final_usage,
+                    )
+                )
 
             if (
                 not has_delta_payload

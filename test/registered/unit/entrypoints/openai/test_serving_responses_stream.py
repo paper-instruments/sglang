@@ -215,6 +215,38 @@ class NonHarmonyStreamTestCase(CustomTestCase):
             "final_answer",
         )
 
+    def test_can_emit_continuous_cumulative_usage(self):
+        serving = make_serving()
+        serving.reasoning_parser = None
+        serving.tool_call_parser = None
+        request = ResponsesRequest(
+            model="x",
+            input="hi",
+            stream=True,
+            store=False,
+            stream_options={"continuous_usage_stats": True},
+        )
+        events = StreamFixture(serving, request).run(
+            [
+                engine_chunk("Hel", 1),
+                engine_chunk("Hello", 2, finish=True),
+            ]
+        )
+        usage = [
+            payload
+            for payload in event_payloads(events)
+            if payload["type"] == "response.usage"
+        ]
+        self.assertEqual(
+            [payload["usage"]["output_tokens"] for payload in usage], [1, 2]
+        )
+        self.assertTrue(all(payload["usage"]["input_tokens"] == 5 for payload in usage))
+        self.assertEqual(usage[-1]["usage"]["total_tokens"], 7)
+        self.assertLess(
+            event_types(events).index("response.usage"),
+            event_types(events).index("response.completed"),
+        )
+
     def test_truncated_and_aborted_streams_have_matching_terminal_events(self):
         reset_context()
         self.addCleanup(reset_context)
@@ -521,7 +553,13 @@ class HarmonyStreamLifecycleTestCase(CustomTestCase):
 
         serving = make_serving()
         serving.use_harmony = True
-        request = ResponsesRequest(model="x", input="hi", stream=True, store=False)
+        request = ResponsesRequest(
+            model="x",
+            input="hi",
+            stream=True,
+            store=False,
+            stream_options={"continuous_usage_stats": True},
+        )
         context = Mock(spec=StreamingHarmonyContext)
         context.messages = []
         context.parser = SimpleNamespace(
@@ -554,6 +592,9 @@ class HarmonyStreamLifecycleTestCase(CustomTestCase):
             )
         )
         payloads = event_payloads(events)
+        usage = next(p for p in payloads if p["type"] == "response.usage")
+        self.assertEqual(usage["usage"]["input_tokens"], 5)
+        self.assertEqual(usage["usage"]["output_tokens"], 3)
         self.assertEqual(payloads[-1]["type"], "response.incomplete")
         self.assertEqual(
             payloads[-1]["response"]["incomplete_details"],

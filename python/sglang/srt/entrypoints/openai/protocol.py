@@ -1831,6 +1831,10 @@ class ResponsesRequest(PDRoutingFields):
     user: Optional[str] = None
 
     # Extra SGLang parameters
+    # Emits private ``response.usage`` SSE events with cumulative usage while
+    # generation is still in progress. The terminal response remains the
+    # authoritative OpenAI-compatible usage record.
+    stream_options: Optional[StreamOptions] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{uuid.uuid4().hex}",
@@ -2139,8 +2143,8 @@ class ResponsesResponse(BaseModel):
     user: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
-    @field_serializer("usage")
-    def _serialize_usage(self, usage: Optional[UsageInfo], _info):
+    @staticmethod
+    def usage_payload(usage: Optional[UsageInfo]) -> Optional[dict]:
         """Emit the Responses usage shape, not the chat one UsageInfo carries."""
         if usage is None:
             return None
@@ -2160,6 +2164,10 @@ class ResponsesResponse(BaseModel):
             "output_tokens_details": {"reasoning_tokens": usage.reasoning_tokens or 0},
             "total_tokens": usage.total_tokens,
         }
+
+    @field_serializer("usage")
+    def _serialize_usage(self, usage: Optional[UsageInfo], _info):
+        return self.usage_payload(usage)
 
     @classmethod
     def from_request(
