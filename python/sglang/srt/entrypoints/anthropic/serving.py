@@ -129,6 +129,10 @@ def _anthropic_usage_from_openai(
         usage_fields["output_tokens"] = (
             0 if force_zero_output else (getattr(usage, "completion_tokens", 0) or 0)
         )
+    if include_output and not force_zero_output:
+        reasoning_tokens = getattr(usage, "reasoning_tokens", None)
+        if reasoning_tokens is not None:
+            usage_fields["reasoning_tokens"] = reasoning_tokens
     return AnthropicUsage(**usage_fields)
 
 

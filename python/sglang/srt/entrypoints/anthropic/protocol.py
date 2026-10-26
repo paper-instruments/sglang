@@ -48,6 +48,7 @@ class AnthropicUsage(BaseModel):
     output_tokens: Optional[NonNegativeInt] = None
     cache_creation_input_tokens: Optional[NonNegativeInt] = None
     cache_read_input_tokens: Optional[NonNegativeInt] = None
+    reasoning_tokens: Optional[NonNegativeInt] = None
 
 
 # ---------- Content blocks (discriminated by ``type``) ----------

@@ -18,6 +18,18 @@ This tutorial covers:
 - Pointing **Claude Code** at the server, including the `CLAUDE_CODE_ATTRIBUTION_HEADER` setting that is
   required for good prefix-cache reuse.
 
+## Token usage
+
+Non-streaming responses report usage on the message. Streaming responses report
+final output usage in `message_delta`. SGLang's optional `usage.reasoning_tokens`
+extension preserves the engine's measured reasoning-token count when available;
+it is a subset of `output_tokens`, not an additional output charge. No request
+flag is required. Initial streaming usage omits this detail, and an unavailable
+count stays absent rather than becoming a measured zero.
+
+With `--enable-cache-report`, `cache_read_input_tokens` reports cached input and
+`input_tokens` reports the uncached remainder. Their sum is the total prompt size.
+
 ## Launch A Server
 
 Launch the server in your terminal and wait for it to initialize. The Anthropic `/v1/messages` endpoint
