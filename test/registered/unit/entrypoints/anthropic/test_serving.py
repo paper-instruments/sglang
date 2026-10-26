@@ -14,7 +14,10 @@ from sglang.srt.entrypoints.anthropic.protocol import (  # noqa: E402
     AnthropicMessage,
     AnthropicMessagesRequest,
 )
-from sglang.srt.entrypoints.anthropic.serving import AnthropicServing  # noqa: E402
+from sglang.srt.entrypoints.anthropic.serving import (  # noqa: E402
+    AnthropicServing,
+    _anthropic_usage_from_openai,
+)
 from sglang.srt.entrypoints.openai.protocol import (  # noqa: E402
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -329,14 +332,16 @@ class TestAnthropicServing(unittest.TestCase):
     def test_stream_usage_subtracts_cache_read_and_omits_final_input_tokens(self):
         usage = {
             "prompt_tokens": 10,
-            "completion_tokens": 0,
-            "total_tokens": 10,
+            "completion_tokens": 1,
+            "total_tokens": 11,
+            "reasoning_tokens": 1,
             "prompt_tokens_details": {"cached_tokens": 4},
         }
         final_usage = {
             "prompt_tokens": 10,
             "completion_tokens": 2,
             "total_tokens": 12,
+            "reasoning_tokens": 1,
             "prompt_tokens_details": {"cached_tokens": 4},
         }
         serving = self._serving(
@@ -364,6 +369,8 @@ class TestAnthropicServing(unittest.TestCase):
         )
         self.assertNotIn("input_tokens", message_delta["usage"])
         self.assertEqual(message_delta["usage"]["output_tokens"], 2)
+        self.assertNotIn("reasoning_tokens", message_start["message"]["usage"])
+        self.assertEqual(message_delta["usage"]["reasoning_tokens"], 1)
 
     def test_non_streaming_usage_subtracts_cache_read_tokens(self):
         response = ChatCompletionResponse.model_validate(
@@ -381,6 +388,7 @@ class TestAnthropicServing(unittest.TestCase):
                     "prompt_tokens": 10,
                     "completion_tokens": 2,
                     "total_tokens": 12,
+                    "reasoning_tokens": 1,
                     "prompt_tokens_details": {"cached_tokens": 4},
                 },
             }
@@ -391,6 +399,19 @@ class TestAnthropicServing(unittest.TestCase):
         self.assertEqual(anthropic_response.usage.input_tokens, 6)
         self.assertEqual(anthropic_response.usage.output_tokens, 2)
         self.assertEqual(anthropic_response.usage.cache_read_input_tokens, 4)
+        self.assertEqual(anthropic_response.usage.reasoning_tokens, 1)
+
+    def test_usage_preserves_zero_reasoning_without_inventing_missing_counts(self):
+        for detail in ({}, {"reasoning_tokens": None}, {"reasoning_tokens": 0}):
+            with self.subTest(detail=detail):
+                usage = SimpleNamespace(prompt_tokens=10, completion_tokens=2, **detail)
+                result = _anthropic_usage_from_openai(
+                    usage, include_input=True, include_output=True
+                ).model_dump(exclude_none=True)
+                if detail.get("reasoning_tokens") is None:
+                    self.assertNotIn("reasoning_tokens", result)
+                else:
+                    self.assertEqual(result["reasoning_tokens"], 0)
 
     def test_tool_result_search_result_content_is_flattened(self):
         request = AnthropicMessagesRequest.model_validate(
